@@ -2,7 +2,7 @@ var cheerio = require('cheerio'),
     request = require('request'),
     Q = require('q');
 
-
+request.defaults({"pool.maxSockets": 20});
 function getFormData(formNode, $) {
     var i, ii, option, name, type,
         node, nodes,
@@ -89,12 +89,11 @@ function getSearchForm() {
     return deferred.promise;
 }
 
-
-function triggerSearch(formData) {
+function triggerPOST(url, formData) {
     var deferred = Q.defer();
 
     request({
-        url: 'http://www.classification.gov.au/Pages/Search.aspx',
+        url: url,
         method: "POST",
         form: formData,
         followAllRedirects: true
@@ -109,6 +108,9 @@ function triggerSearch(formData) {
     return deferred.promise;
 }
 
+function triggerSearch(formData) {
+    return triggerPOST('http://www.classification.gov.au/Pages/Search.aspx', formData);
+}
 
 function getRecordsForYear(year) {
     year = parseInt(year, 10);
@@ -132,8 +134,27 @@ function getRecordsForYear(year) {
     })
     .then(triggerSearch)
     .then(sortByOldest)
-    .then(console.log)
-    .fail(console.log);
+    //.then(function(o) { console.log(o); return o; })
+    .then(scrapeResults); // scrapes them all!
+}
+
+function scrapeResults(response) {
+    // For each page, scrape every URL out of it
+    var page = new ResultsPage(response);
+    console.log("Scraping classifications...");
+    page.scrapeClassifications();
+
+    if (page.hasNextPage()) {
+        console.log("Next page!");
+        page.nextPage().then(scrapeResults);
+    } else {
+        console.log("DONE!");
+    }
+}
+
+function scrapeClassification(response) {
+    //var page = new ClassificationsPage(response);
+    console.log(cheerio.load(response.body)(".ncd-title-container .ncd-title").text().trim());
 }
 
 
@@ -145,23 +166,46 @@ function getResultCount(node) {
     return [start, end, total];
 }
 
-
-function scrapePage(response, callback) {
-    var $ = cheerio.load(response.body),
-        _x = getResultCount($.root()), 
-        start = _x[0], end = _x[1], total = _x[2],
-        button,
-        buttons = $(".ncd-results-table table input[type='submit']"),
-        i, ii, query;
-    
-    for (i = 0, ii = buttons.length; i < ii; ++i) {
-        button = $(buttons[i]);
-        query = getFormData($.root(), $);
-        query[button.attr('name')] = button.attr('value');
-       
-        // TODO GET CLASSIFICATION DATA
-    }
+function ResultsPage(response) {
+    this.response = response
+    this.$ = cheerio.load(response.body);
 }
+
+ResultsPage.prototype.hasNextPage = function() {
+    return this.$(".pager-ctl a:last-child").attr('href');
+}
+
+ResultsPage.prototype.nextPage = function() {
+    var formData = getFormData(this.$.root(), this.$),
+        href = this.$(".pager-ctl a:last-child").attr('href');
+
+    if (href == null) {
+        return;
+    }
+
+    href = href.replace("javascript:__doPostBack('", "").replace("','')", "");
+    formData.__EVENTTARGET = href;
+
+    return triggerPOST(this.response.request.uri.href, formData);
+}
+
+ResultsPage.prototype.getClassificationLinks = function() {
+    return this.$(".ncd-results-table table input[type='submit']");
+}
+
+ResultsPage.prototype.scrapeClassifications = function() {
+    var $ = this.$,
+        response = this.response,
+        formData = getFormData(this.$.root(), this.$);
+
+    this.getClassificationLinks().each(function() {
+        formData[this.attr('name')] = this.attr('value');
+        triggerPOST(response.request.uri.href, formData)
+        .then(scrapeClassification);
+        //TODO add fail hadnler
+    });
+}
+
 
 getRecordsForYear(2000);
 
